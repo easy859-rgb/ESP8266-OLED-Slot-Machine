@@ -37,4 +37,317 @@ enum GameState { STATE_STARTUP, STATE_IDLE, STATE_SPINNING, STATE_JACKPOT, STATE
 // ===================== BITMAPS =====================
 const unsigned char PROGMEM icon_seven[] = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3f, 0xff, 0xc0, 0x3f, 0xff, 0xc0, 0x3f, 0xff, 0xc0, 0x00, 
-  0x03, 0x80, 0x00, 0x07, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x1c, 0x00
+  0x03, 0x80, 0x00, 0x07, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x38, 0x00, 0x00, 0x70, 
+  0x00, 0x00, 0xe0, 0x00, 0x01, 0xc0, 0x00, 0x03, 0x80, 0x00, 0x07, 0x00, 0x00, 0x0e, 0x00, 0x00, 
+  0x1c, 0x00, 0x00, 0x38, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+const unsigned char PROGMEM icon_cherry[] = {
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00, 0x78, 0x00, 0x00, 0xcc, 0x00, 0x01, 
+  0x86, 0x00, 0x03, 0x03, 0x00, 0x06, 0x01, 0x80, 0x0c, 0x00, 0xc0, 0x18, 0x00, 0x60, 0x31, 0xc0, 
+  0x30, 0x77, 0xe0, 0x78, 0x6f, 0xf0, 0xf8, 0xdf, 0xf9, 0xfc, 0xff, 0xfb, 0xfc, 0xff, 0xfb, 0xfc, 
+  0x7f, 0xff, 0xf8, 0x7f, 0xff, 0xf8, 0x3f, 0xff, 0xf0, 0x1f, 0xff, 0xe0, 0x07, 0xff, 0x80, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+const unsigned char PROGMEM icon_diamond[] = {
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x3c, 0x00, 0x00, 0x7e, 0x00, 0x00, 
+  0xff, 0x00, 0x01, 0xff, 0x80, 0x03, 0xff, 0xc0, 0x07, 0xff, 0xe0, 0x0f, 0xff, 0xf0, 0x1f, 0xff, 
+  0xf8, 0x3f, 0xff, 0xfc, 0x1f, 0xff, 0xf8, 0x0f, 0xff, 0xf0, 0x07, 0xff, 0xe0, 0x03, 0xff, 0xc0, 
+  0x01, 0xff, 0x80, 0x00, 0xff, 0x00, 0x00, 0x7e, 0x00, 0x00, 0x3c, 0x00, 0x00, 0x18, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+const unsigned char* const symbolList[] = { icon_seven, icon_cherry, icon_diamond };
+
+// ===================== GLOBALS =====================
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+GameState gameState = STATE_STARTUP;
+int totalPoints = STARTING_POINTS;
+int highScore = 0;
+int potentialWin = 0;
+int freeSpins = 0; 
+int winHistory[5] = {0, 0, 0, 0, 0};
+
+struct Reel { float offset; float speed; int symbol; bool spinning; unsigned long stopDelay; };
+Reel reels[NUM_REELS];
+
+unsigned long lastFrameTime = 0;
+const int frameDelay = 33; 
+unsigned long jackpotTimer = 0;
+int jackpotStep = 0;
+unsigned long startupStart = 0;
+
+// ===================== HELPERS =====================
+void resetGameData() {
+  highScore = 0;
+  for (int i = 0; i < 5; i++) winHistory[i] = 0;
+  EEPROM.put(EEPROM_ADDR_HISCORE, highScore);
+  for (int i = 0; i < 5; i++) EEPROM.put(EEPROM_ADDR_HISTORY + (i * sizeof(int)), winHistory[i]);
+  EEPROM.commit();
+  tone(BUZZER_PIN, 200, 500);
+  display.clearDisplay();
+  display.setCursor(30, 25);
+  display.print("DATA RESET!");
+  display.display();
+  delay(1500);
+}
+
+void playBonusAnimation() {
+  for (int i = 0; i < 4; i++) {
+    display.clearDisplay();
+    display.drawRect(10, 10, 108, 44, WHITE);
+    display.setTextSize(2);
+    display.setCursor(30, 25);
+    display.print("BONUS!");
+    display.display();
+    tone(BUZZER_PIN, 1800, 100); delay(80);
+    tone(BUZZER_PIN, 2200, 100); delay(80);
+    display.clearDisplay();
+    display.display();
+    delay(100);
+  }
+}
+
+void addWinToHistory(int amt) {
+  for (int i = 4; i > 0; i--) winHistory[i] = winHistory[i-1];
+  winHistory[0] = amt;
+  for (int i = 0; i < 5; i++) EEPROM.put(EEPROM_ADDR_HISTORY + (i * sizeof(int)), winHistory[i]);
+  EEPROM.commit();
+}
+
+void drawSymbol(int type, int x, int y) {
+  display.drawBitmap(x, y, symbolList[type], 24, 24, WHITE);
+  display.drawRect(x-1, y-1, 26, 26, WHITE); 
+}
+
+void drawHUD() {
+  display.setTextSize(1);
+  display.setCursor(0, 0); display.print("HI:"); display.print(highScore);
+  display.setCursor(85, 0); display.print("V:"); display.print(totalPoints);
+  if (freeSpins > 0) {
+    display.setCursor(45, 0); display.print("FREE:"); display.print(freeSpins);
+  }
+}
+
+void drawCardSuit(bool isWin, int x, int y) {
+  if (isWin) {
+    display.fillCircle(x - 4, y, 4, WHITE); display.fillCircle(x + 4, y, 4, WHITE);
+    display.fillTriangle(x - 8, y + 2, x + 8, y + 2, x, y + 10, WHITE);
+  } else {
+    display.fillCircle(x - 4, y + 4, 4, WHITE); display.fillCircle(x + 4, y + 4, 4, WHITE);
+    display.fillTriangle(x - 8, y + 4, x + 8, y + 4, x, y - 4, WHITE);
+    display.fillRect(x - 1, y + 4, 3, 6, WHITE);
+  }
+}
+
+void playWinAnimation(int amt) {
+  for(int i=0; i < 6; i++) {
+    display.clearDisplay();
+    drawHUD();
+    for (int r=0; r<3; r++) drawSymbol(reels[r].symbol, 14 + r*38, 22);
+    if (i % 2 == 0) display.drawFastHLine(10, 34, 108, WHITE);
+    display.display();
+    digitalWrite(LED1, i%2); digitalWrite(LED3, i%2);
+    tone(BUZZER_PIN, (unsigned int)(800 + (i*100)), 80);
+    delay(100);
+  }
+  digitalWrite(LED1, LOW); digitalWrite(LED3, LOW);
+}
+
+void resolveDouble(bool gambled) {
+  if (!gambled) {
+    totalPoints += potentialWin;
+    addWinToHistory(potentialWin);
+    if (totalPoints > highScore) { highScore = totalPoints; EEPROM.put(EEPROM_ADDR_HISCORE, highScore); EEPROM.commit(); }
+    tone(BUZZER_PIN, 1200, 100);
+    gameState = STATE_IDLE;
+  } else {
+    for (int i = 0; i < 8; i++) {
+      display.clearDisplay();
+      display.drawRect(44 + ((i%2==0)?-2:2), 15, 40, 35, WHITE); display.display();
+      tone(BUZZER_PIN, (unsigned int)(400 + (i * 50)), 20); delay(50);
+    }
+    bool isWin = (random(0, 3) == 0); 
+    display.clearDisplay(); display.drawRect(44, 15, 40, 35, WHITE);
+    drawCardSuit(isWin, 64, 32); display.display();
+    if (isWin) {
+      potentialWin *= 2; tone(BUZZER_PIN, 1500, 200); delay(1000);
+    } else {
+      potentialWin = 0; tone(BUZZER_PIN, 200, 600); delay(1500);
+      gameState = (totalPoints < SPIN_COST && freeSpins == 0) ? STATE_GAMEOVER : STATE_IDLE;
+    }
+  }
+}
+
+void evaluateResult() {
+  int s[3] = {reels[0].symbol, reels[1].symbol, reels[2].symbol};
+  bool allSame = (s[0] == s[1] && s[1] == s[2]);
+  bool twoSevens = ((s[0] == s[1] && s[0] == 0) || 
+                    (s[1] == s[2] && s[1] == 0) || 
+                    (s[0] == s[2] && s[0] == 0));
+
+  if (allSame) {
+    freeSpins += 5; 
+    playBonusAnimation();
+    if (s[0] == 0) {
+      totalPoints += PAYOUT_JACKPOT; addWinToHistory(PAYOUT_JACKPOT);
+      if(totalPoints > highScore) { highScore = totalPoints; EEPROM.put(EEPROM_ADDR_HISCORE, highScore); EEPROM.commit(); }
+      jackpotStep = 0; jackpotTimer = millis(); gameState = STATE_JACKPOT;
+    } else {
+      potentialWin = PAYOUT_3_KIND;
+      playWinAnimation(potentialWin); gameState = STATE_DOUBLE; 
+    }
+  } else if (twoSevens) { 
+    potentialWin = PAYOUT_2_KIND;
+    playWinAnimation(potentialWin); gameState = STATE_DOUBLE; 
+  } else {
+    digitalWrite(LED2, HIGH); tone(BUZZER_PIN, 300, 300); delay(400); digitalWrite(LED2, LOW);
+    gameState = (totalPoints < SPIN_COST && freeSpins == 0) ? STATE_GAMEOVER : STATE_IDLE;
+  }
+}
+
+// ===================== SETUP =====================
+void setup() {
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.get(EEPROM_ADDR_HISCORE, highScore);
+  if (highScore < 0 || highScore > 99999) highScore = 0;
+  for (int i = 0; i < 5; i++) EEPROM.get(EEPROM_ADDR_HISTORY + (i * sizeof(int)), winHistory[i]);
+  
+  pinMode(BUTTON_1_PIN, INPUT_PULLUP); pinMode(BUTTON_2_PIN, INPUT_PULLUP);
+  pinMode(LED1, OUTPUT); pinMode(LED2, OUTPUT); pinMode(LED3, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT); Wire.begin(SDA_PIN, SCL_PIN);
+  
+  uint32_t seed = analogRead(A0);
+  seed ^= ESP.getCycleCount();
+  seed ^= micros();
+  randomSeed(seed);
+
+  display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS); 
+  display.setTextColor(WHITE);
+  display.clearDisplay();
+  display.display();
+  
+  for(int i=0; i<NUM_REELS; i++) reels[i].symbol = random(0, SYMBOL_COUNT);
+  startupStart = millis();
+}
+
+// ===================== LOOP =====================
+void loop() {
+  unsigned long now = millis();
+  bool b1 = (digitalRead(BUTTON_1_PIN) == LOW);
+  bool b2 = (digitalRead(BUTTON_2_PIN) == LOW);
+
+  // --- GAME LOGIC ---
+  if (gameState == STATE_IDLE) {
+    if (b1) {
+      bool canSpin = false;
+      if (freeSpins > 0) { freeSpins--; canSpin = true; }
+      else if (totalPoints >= SPIN_COST) { totalPoints -= SPIN_COST; canSpin = true; }
+      if (canSpin) {
+        for (int i=0; i<3; i++) { 
+          reels[i].spinning = true; 
+          reels[i].speed = 14.0f + (random(0,50)/10.0f);
+          reels[i].stopDelay = now + 800 + (i * 1000); 
+        }
+        gameState = STATE_SPINNING; delay(250);
+      }
+    }
+    if (b2) { gameState = STATE_HISTORY; delay(250); }
+  } else if (gameState == STATE_HISTORY) {
+     if (b1 && b2) { resetGameData(); gameState = STATE_IDLE; }
+     else if (b2) { gameState = STATE_IDLE; delay(250); }
+  } else if (gameState == STATE_GAMEOVER && b1) {
+    totalPoints = STARTING_POINTS; freeSpins = 0; gameState = STATE_IDLE; delay(250);
+  } else if (gameState == STATE_DOUBLE) {
+    if (b1) { resolveDouble(false); delay(250); }
+    if (b2) { resolveDouble(true); delay(250); }
+  }
+
+  // --- RENDERING ---
+  if (now - lastFrameTime >= frameDelay) {
+    lastFrameTime = now;
+    switch (gameState) {
+      case STATE_STARTUP:
+        display.clearDisplay(); display.setTextSize(2); display.setCursor(30, 25);
+        display.print("SLOT-3"); display.display();
+        if (now - startupStart > 2000) gameState = STATE_IDLE;
+        break;
+      case STATE_IDLE:
+        display.clearDisplay(); drawHUD();
+        for (int i=0; i<3; i++) drawSymbol(reels[i].symbol, 14 + i*38, 22);
+        display.display();
+        break;
+      case STATE_SPINNING:
+      {
+        display.clearDisplay(); drawHUD(); bool allStopped = true;
+        int ledCycle = (now / 150) % 3; 
+        digitalWrite(LED1, (ledCycle == 0)); digitalWrite(LED2, (ledCycle == 1)); digitalWrite(LED3, (ledCycle == 2));
+
+        for (int i=0; i<3; i++) {
+          if (reels[i].spinning) {
+            reels[i].offset += reels[i].speed;
+            if (reels[i].offset >= 24) { 
+               reels[i].offset = 0; 
+               reels[i].symbol = random(0, SYMBOL_COUNT);
+               tone(BUZZER_PIN, 1400, 5); 
+            }
+            if (now > reels[i].stopDelay) { 
+              reels[i].speed *= 0.93f; 
+              if (reels[i].speed < 0.5f) { 
+                reels[i].spinning = false; reels[i].offset = 0; 
+                tone(BUZZER_PIN, 180 - (i*20), 80); 
+              }
+            }
+            allStopped = false;
+          }
+          drawSymbol(reels[i].symbol, 14 + i*38, 22 + (int)reels[i].offset);
+          drawSymbol((reels[i].symbol + 1) % SYMBOL_COUNT, 14 + i*38, 22 + (int)reels[i].offset - 24);
+        }
+        display.display(); 
+        if (allStopped) {
+          digitalWrite(LED1, LOW); digitalWrite(LED2, LOW); digitalWrite(LED3, LOW);
+          evaluateResult();
+        }
+      }
+      break;
+      case STATE_DOUBLE:
+        display.clearDisplay(); display.setTextSize(1); display.setCursor(20, 0); display.print("DOUBLE OR KEEP?");
+        display.setTextSize(2); display.setCursor(45, 20); display.print(potentialWin);
+        display.setTextSize(1); display.setCursor(0, 50); display.print("[B1] COLL");
+        display.setCursor(75, 50); display.print("[B2] GAMB"); display.display();
+        break;
+      case STATE_HISTORY:
+        display.clearDisplay(); display.setTextSize(1); display.setCursor(30, 0); display.print("WIN HISTORY");
+        for (int i = 0; i < 5; i++) { display.setCursor(40, 12 + (i * 10)); display.print(i + 1); display.print(": "); display.print(winHistory[i]); }
+        display.setCursor(10, 60); display.print("HOLD BOTH TO RESET");
+        display.display();
+        break;
+      case STATE_JACKPOT:
+        if (now - jackpotTimer > 50) { 
+          jackpotTimer = now; jackpotStep++;
+          if (jackpotStep % 2 == 0) {
+            digitalWrite(LED1, HIGH); digitalWrite(LED3, HIGH); digitalWrite(LED2, LOW);
+            tone(BUZZER_PIN, 600, 50); 
+          } else {
+            digitalWrite(LED1, LOW); digitalWrite(LED3, LOW); digitalWrite(LED2, HIGH);
+            tone(BUZZER_PIN, 1200, 50); 
+          }
+          display.clearDisplay();
+          if (jackpotStep % 2 == 0) display.fillRect(0,0,128,64,WHITE);
+          else { display.setTextSize(2); display.setCursor(15,25); display.print("!JACKPOT!"); }
+          display.display(); 
+          if (jackpotStep > 80) {
+            digitalWrite(LED1, LOW); digitalWrite(LED2, LOW); digitalWrite(LED3, LOW);
+            display.setTextSize(1);
+            gameState = STATE_IDLE;
+          }
+        }
+        break;
+      case STATE_GAMEOVER:
+        display.clearDisplay(); display.setCursor(35, 25);
+        display.print("OUT OF VAL"); display.setCursor(25, 40); display.print("PUSH B1 RESET");
+        display.display();
+        break;
+    }
+  }
+}
